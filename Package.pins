@@ -1,0 +1,12 @@
+{
+  "autoPin": true,
+  "pins": [
+    {
+      "package": "Clibdbus",
+      "reason": null,
+      "repositoryURL": "/Users/ethan/Developer/Clibdbus",
+      "version": "1.0.6"
+    }
+  ],
+  "version": 1
+}
