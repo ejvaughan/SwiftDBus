@@ -147,7 +147,7 @@ class SwiftDbusTests: XCTestCase {
             expect.fulfill()
         }
         
-        waitForExpectations(timeout: 2.0, handler: nil)
+        waitForExpectations(timeout: 100.0, handler: nil)
     }
 
     static var allTests = [

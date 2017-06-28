@@ -361,12 +361,21 @@ func ConnectionAddWatch(watch: OpaquePointer?, data: UnsafeMutableRawPointer?) -
         // Create read source
         let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: conn.queue)
         readSource.setEventHandler {
+            print("Handling read source... has incoming messages: \(dbus_connection_get_dispatch_status(conn.conn) == DBUS_DISPATCH_DATA_REMAINS)")
             dbus_watch_handle(watch, DBUS_WATCH_READABLE.rawValue)
+            
+            while (dbus_connection_get_dispatch_status(conn.conn) != DBUS_DISPATCH_COMPLETE) {
+                dbus_connection_dispatch(conn.conn)
+            }
+            
+            print("Handling read source... has incoming messages: \(dbus_connection_get_dispatch_status(conn.conn) == DBUS_DISPATCH_DATA_REMAINS)")
         }
         
         conn.readSources[watch] = readSource
         
-        readSource.resume()
+        if dbus_watch_get_enabled(watch) > 0 {
+            readSource.resume()
+        }
     }
     
     if flags & DBUS_WATCH_WRITABLE.rawValue > 0 {
@@ -378,7 +387,9 @@ func ConnectionAddWatch(watch: OpaquePointer?, data: UnsafeMutableRawPointer?) -
         
         conn.writeSources[watch] = writeSource
         
-        writeSource.resume()
+        if dbus_watch_get_enabled(watch) > 0 {
+            writeSource.resume()
+        }
     }
     
     return 1
@@ -432,6 +443,9 @@ func ConnectionAddTimeout(timeout: OpaquePointer?, data: UnsafeMutableRawPointer
     timer.scheduleRepeating(deadline: .now() + .milliseconds(Int(interval)), interval: .milliseconds(Int(interval)))
     timer.setEventHandler { 
         dbus_timeout_handle(timeout)
+        while (dbus_connection_get_dispatch_status(conn.conn) != DBUS_DISPATCH_COMPLETE) {
+            dbus_connection_dispatch(conn.conn)
+        }
     }
     conn.timers[timeout] = timer
     timer.resume()
@@ -459,16 +473,16 @@ func ConnectionToggleTimeout(timeout: OpaquePointer?, data: UnsafeMutableRawPoin
     }
 }
 
-func ConnectionDispatchStatusChanged(underlyingConnection: OpaquePointer?, status: DBusDispatchStatus, data: UnsafeMutableRawPointer?) {
-    guard let underlyingConnection = underlyingConnection, let data = data else { return }
-    let conn = Unmanaged<Connection>.fromOpaque(data).takeUnretainedValue()
-    
-    if status == DBUS_DISPATCH_DATA_REMAINS {
-        conn.queue.async {
-            dbus_connection_dispatch(underlyingConnection)
-        }
-    }
-}
+//func ConnectionDispatchStatusChanged(underlyingConnection: OpaquePointer?, status: DBusDispatchStatus, data: UnsafeMutableRawPointer?) {
+//    guard let underlyingConnection = underlyingConnection, let data = data else { return }
+//    let conn = Unmanaged<Connection>.fromOpaque(data).takeUnretainedValue()
+//    
+//    if status == DBUS_DISPATCH_DATA_REMAINS {
+//        conn.queue.async {
+//            dbus_connection_dispatch(underlyingConnection)
+//        }
+//    }
+//}
 
 public class Connection {
     
@@ -498,9 +512,9 @@ public class Connection {
         self.queue = queue
         
         let data = Unmanaged.passUnretained(self).toOpaque()
+        //dbus_connection_set_dispatch_status_function(conn, ConnectionDispatchStatusChanged, data, nil)
         dbus_connection_set_watch_functions(c, ConnectionAddWatch, ConnectionRemoveWatch, ConnectionToggleWatch, data, nil)
         dbus_connection_set_timeout_functions(conn, ConnectionAddTimeout(timeout:data:), ConnectionRemoveTimeout, ConnectionToggleTimeout, data, nil)
-        dbus_connection_set_dispatch_status_function(conn, ConnectionDispatchStatusChanged, data, nil)
     }
     
     deinit {
