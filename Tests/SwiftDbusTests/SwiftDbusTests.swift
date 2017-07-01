@@ -3,11 +3,6 @@ import Clibdbus
 @testable import SwiftDbus
 
 class SwiftDbusTests: XCTestCase {
-    func testExample() {
-        // This is an example of a functional test case.
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        XCTAssertEqual(DBusArray<DBusArray<UInt8>>._dbusTypeSignature, "aay")
-    }
 
     func testStringIterAppend() {
         var message = dbus_message_new(DBUS_MESSAGE_TYPE_METHOD_CALL)
@@ -137,20 +132,104 @@ class SwiftDbusTests: XCTestCase {
         
         let expect = expectation(description: "Waiting for method callback")
         
-        dbusObject.invoke(method: "ListNames") { (results, error) in
-            if let error = error {
-                XCTFail()
+        dbusObject.invoke(method: "ListNames") { result in
+            if case let .success(arguments) = result {
+                print("Received names: \(arguments)")
             } else {
-                print("Received names: \(results!)")
+                XCTFail()
             }
             
             expect.fulfill()
         }
         
-        waitForExpectations(timeout: 100.0, handler: nil)
+        waitForExpectations(timeout: 5.0, handler: nil)
+    }
+    
+    func testSignalHandlerForUniqueConnectionName() {
+        let receiverConnection = try! Connection(type: .session)
+        let senderConnection = try! Connection(type: .session)
+        let senderName = String(cString: dbus_bus_get_unique_name(senderConnection.conn))
+        
+        let expect = expectation(description: "Waiting for 'Foo' signal")
+        
+        var p: ObjectProxy?
+        
+        receiverConnection.makeProxy(forService: senderName, interface: "com.ejv.test", objectPath: "/com/ejv/test") { proxy in
+            guard let proxy = proxy else { XCTFail(); return }
+            
+            p = proxy
+            
+            proxy.registerSignalHandler(for: "Foo", with: { (results) in
+                expect.fulfill()
+            })
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) {
+                var serial: dbus_uint32_t = 0
+                let signalMessage = dbus_message_new_signal("/com/ejv/test", "com.ejv.test", "Foo")
+                dbus_connection_send(senderConnection.conn, signalMessage, &serial)
+            }
+        }
+        
+        waitForExpectations(timeout: 5.0, handler: nil)
+    }
+    
+    func testSignalHandlerForWellKnownName() {
+        let receiverConnection = try! Connection(type: .session)
+        
+        let expect = expectation(description: "Waiting for 'Foo' signal")
+        
+        var p: ObjectProxy?
+        
+        receiverConnection.makeProxy(forService: "com.ejv.test", interface: "com.ejv.test", objectPath: "/com/ejv/test") { (proxy) in
+            guard let proxy = proxy else { XCTFail(); return }
+            
+            p = proxy
+            
+            proxy.registerSignalHandler(for: "Foo", with: { (results) in
+                expect.fulfill()
+            })
+        }
+        
+        let senderConnection = try! Connection(type: .session)
+        
+        senderConnection.request(name: "com.ejv.test", queueRequest: false) { result in
+            guard let result = result, result == .primaryOwner else { XCTFail(); return }
+            
+            var serial: dbus_uint32_t = 0
+            let signalMessage = dbus_message_new_signal("/com/ejv/test", "com.ejv.test", "Foo")
+            dbus_connection_send(senderConnection.conn, signalMessage, &serial)
+        }
+        
+        waitForExpectations(timeout: 5.0, handler: nil)
+    }
+    
+    func testBusObjectProxySignalHandler() {
+        let receiverConnection = try! Connection(type: .session)
+        
+        let expect = expectation(description: "Waiting for 'NameAcquired' signal")
+        
+        var p: ObjectProxy?
+        
+        receiverConnection.makeProxy(forService: "org.freedesktop.DBus", interface: "org.freedesktop.DBus", objectPath: "/org/freedesktop/DBus") { proxy in
+            guard let proxy = proxy else { XCTFail(); return }
+            
+            p = proxy
+            
+            proxy.registerSignalHandler(for: "NameAcquired", with: { (results) in
+                if let name = results[0] as? String, name == "com.ejv.test" {
+                    expect.fulfill()
+                }
+            })
+            
+            receiverConnection.request(name: "com.ejv.test", queueRequest: false) { result in
+                guard let result = result, result == .primaryOwner else { XCTFail(); return }
+            }
+        }
+        
+        waitForExpectations(timeout: 5.0, handler: nil)
     }
 
     static var allTests = [
-        ("testExample", testExample),
+        ("testStringIterAppend", testStringIterAppend)
     ]
 }
