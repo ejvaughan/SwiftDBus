@@ -28,7 +28,6 @@ func PendingCallReceivedReply(pendingCall: OpaquePointer?, data: UnsafeMutableRa
     }
     
     objectProxy.callbacks[pendingCall] = nil
-    dbus_pending_call_unref(pendingCall)
 }
 
 func ObjectProxyFilterMessage(connection: OpaquePointer?, rawMessage: OpaquePointer?, data: UnsafeMutableRawPointer?) -> DBusHandlerResult {
@@ -72,12 +71,16 @@ public class ObjectProxy {
     public let service: String
     public let interface: String?
     public let objectPath: String
-    public let connection: Connection
+    public unowned let connection: Connection
+    private var connectionStrongRef: Connection?
     var callbacks: [OpaquePointer:MethodCallback] = [:]
     var signalHandlers: [String:SignalHandler] = [:]
     
-    init(connection: Connection, service: String, interface: String? = nil, objectPath: String) {
+    init(connection: Connection, stronglyReference: Bool = true, service: String, interface: String? = nil, objectPath: String) {
         self.connection = connection
+        if stronglyReference {
+            self.connectionStrongRef = connection
+        }
         self.service = service
         self.interface = interface
         self.objectPath = objectPath

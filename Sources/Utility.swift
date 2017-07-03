@@ -8,8 +8,6 @@
 
 import Clibdbus
 
-extension DBusError: Error {}
-
 // print becomes a nop for release builds
 func print(items: Any..., separator: String = " ", terminator: String = "\n") {
     

@@ -173,7 +173,77 @@ func ConnectionFilterMessage(connection: OpaquePointer?, rawMessage: OpaquePoint
     return DBUS_HANDLER_RESULT_NOT_YET_HANDLED
 }
 
+extension ExportedObject {
+    fileprivate func methodMatching(name: String, interface: String?) -> ExportedMethod? {
+        if let interface = interface {
+            return self.exportedMethods[interface]?[name]
+        } else {
+            // Search for a matching method
+            for (_, methods) in self.exportedMethods {
+                for (name, method) in methods {
+                    if name == name {
+                        return method
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+}
+
+func ExportedObjectHandleMethodCall(connection: OpaquePointer?, messageRaw: OpaquePointer?, data: UnsafeMutableRawPointer?) -> DBusHandlerResult {
+    guard let connection = connection, let messageRaw = messageRaw, let data = data else { return DBUS_HANDLER_RESULT_NOT_YET_HANDLED }
+    let message = MessageWrapper(messageRaw)
+    let exportedObject = Unmanaged<AnyObject>.fromOpaque(data).takeUnretainedValue() as! ExportedObject
+    
+    guard let methodName = message.member, let handler = exportedObject.methodMatching(name: methodName, interface: message.interface) else {
+        let reply = dbus_message_new_error(messageRaw, DBUS_ERROR_UNKNOWN_METHOD, nil)
+        defer {
+            dbus_message_unref(reply)
+        }
+        dbus_connection_send(connection, reply, nil)
+        return DBUS_HANDLER_RESULT_HANDLED
+    }
+    
+    // The block needs strong references to these guys
+    dbus_message_ref(messageRaw)
+    dbus_connection_ref(connection)
+    
+    handler(message.arguments) { result in
+        switch result {
+        case let .success(returnValues):
+            let reply = dbus_message_new_method_return(messageRaw)
+            defer { dbus_message_unref(reply) }
+            
+            if let returnValues = returnValues {
+                var messageIter = DBusMessageIter()
+                dbus_message_iter_init_append(reply, &messageIter)
+                returnValues.forEach { $0._append(to: &messageIter) }
+            }
+            
+            dbus_connection_send(connection, reply, nil)
+        case let .error(errorName):
+            let reply = errorName.withCString {
+                dbus_message_new_error(messageRaw, $0, nil)
+            }
+            defer { dbus_message_unref(reply) }
+            
+            dbus_connection_send(connection, reply, nil)
+        }
+        
+        dbus_message_unref(messageRaw)
+        dbus_connection_unref(connection)
+    }
+    
+    return DBUS_HANDLER_RESULT_HANDLED
+}
+
 public class Connection {
+    
+    public enum Errors: Error {
+        case connectionFailed(String?)
+    }
     
     public enum BusType {
         case system
@@ -195,19 +265,25 @@ public class Connection {
     }
     
     let conn: OpaquePointer
-    lazy var busProxy: ObjectProxy = ObjectProxy(connection: self, service: "org.freedesktop.DBus", interface: "org.freedesktop.DBus", objectPath: "/org/freedesktop/DBus")
+    var busProxy: ObjectProxy!
     var readSources: [OpaquePointer:DispatchSourceRead] = [:]
     var writeSources: [OpaquePointer:DispatchSourceWrite] = [:]
     var timers: [OpaquePointer:DispatchSourceTimer] = [:]
     var uniqueNameForBusName: [String:String] = ["org.freedesktop.DBus":"org.freedesktop.DBus"]
-    var uniqueNameObservations: Set<String> = []
-    
+    private var uniqueNameObservations: Set<String> = []
+    private var exportedObjects: [String:ExportedObject] = [:]
     
     public let queue: DispatchQueue
     
     public init(type busType: BusType, queue: DispatchQueue = .main) throws {
         var error = DBusError()
-        guard let c = dbus_bus_get_private(busType.underlyingType, &error) else { throw error }
+        dbus_error_init(&error)
+        defer { dbus_error_free(&error) }
+        
+        guard let c = dbus_bus_get_private(busType.underlyingType, &error) else {
+            let errorMessage = error.message
+            throw Errors.connectionFailed(errorMessage.flatMap({ String(cString: $0) }))
+        }
         self.conn = c
         self.queue = queue
         
@@ -217,12 +293,21 @@ public class Connection {
         dbus_connection_set_timeout_functions(conn, ConnectionAddTimeout(timeout:data:), ConnectionRemoveTimeout, ConnectionToggleTimeout, data, nil)
         
         dbus_connection_add_filter(conn, ConnectionFilterMessage, data, nil)
+        busProxy = ObjectProxy(connection: self, stronglyReference: false, service: "org.freedesktop.DBus", interface: "org.freedesktop.DBus", objectPath: "/org/freedesktop/DBus")
     }
     
     deinit {
+        for (path, _) in exportedObjects {
+            unexportObject(at: path)
+        }
         dbus_connection_remove_filter(conn, ConnectionFilterMessage, Unmanaged.passUnretained(self).toOpaque())
         dbus_connection_close(self.conn)
         dbus_connection_unref(self.conn)
+    }
+    
+    public var uniqueName: String {
+        let cString = dbus_bus_get_unique_name(conn)
+        return cString.flatMap({ String(cString: $0) }) ?? ""
     }
     
     public func request(name: String, allowingReplacement: Bool = false, queueRequest: Bool = true, replaceExisting: Bool = false, completionHandler: @escaping (RequestNameResult?) -> Void) {
@@ -249,16 +334,6 @@ public class Connection {
         }
     }
     
-    private func observeUniqueNameChanges(for service: String) {
-        guard !uniqueNameObservations.contains(service) else { return }
-        
-        let matchRule = "type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='" + service + "'"
-        matchRule.withCString {
-            dbus_bus_add_match(conn, $0, nil)
-        }
-        uniqueNameObservations.insert(service)
-    }
-    
     public func makeProxy(forService service: String, interface: String? = nil, objectPath: String, completionHandler: @escaping (ObjectProxy?) -> Void) {
         if service.hasPrefix(":") || uniqueNameForBusName[service] != nil {
             let proxy = ObjectProxy(connection: self, service: service, interface: interface, objectPath: objectPath)
@@ -282,5 +357,53 @@ public class Connection {
                 }
             }
         }
+    }
+    
+    public func unexportObject(_ object: ExportedObject) {
+        guard let path = exportedObjectPath(for: object) else { return }
+        unexportObject(at: path)
+    }
+    
+    public func export(object: ExportedObject, at path: String)  {
+        unexportObject(at: path)
+        
+        path.withCString {
+            var vtable = DBusObjectPathVTable()
+            vtable.message_function = ExportedObjectHandleMethodCall
+            let data = Unmanaged<AnyObject>.passUnretained(object).toOpaque()
+            
+            if dbus_connection_try_register_object_path(conn, $0, &vtable, data, nil) != 0 {
+                object.connection = self
+                exportedObjects[path] = object
+            }
+        }
+    }
+    
+    public func exportedObjectPath(for object: ExportedObject) -> String? {
+        for (path, existing) in exportedObjects {
+            if object === existing {
+                return path
+            }
+        }
+        
+        return nil
+    }
+    
+    private func observeUniqueNameChanges(for service: String) {
+        guard !uniqueNameObservations.contains(service) else { return }
+        
+        let matchRule = "type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='" + service + "'"
+        matchRule.withCString {
+            dbus_bus_add_match(conn, $0, nil)
+        }
+        uniqueNameObservations.insert(service)
+    }
+    
+    private func unexportObject(at path: String) {
+        guard let _ = exportedObjects[path] else { return }
+        path.withCString {
+            _ = dbus_connection_unregister_object_path(conn, $0)
+        }
+        exportedObjects[path] = nil
     }
 }
