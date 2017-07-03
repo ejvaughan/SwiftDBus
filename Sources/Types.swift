@@ -129,6 +129,10 @@ func getValue(_ iter: UnsafeMutablePointer<DBusMessageIter>) -> Any {
         var str: UnsafePointer<Int8>? = nil
         dbus_message_iter_get_basic(iter, &str)
         return DBusObjectPath(str.flatMap({ String(cString: $0) }) ?? "")
+    case .signature:
+        var str: UnsafePointer<Int8>? = nil
+        dbus_message_iter_get_basic(iter, &str)
+        return DBusSignature(str.flatMap({ String(cString: $0) }) ?? "")
     case .variant:
         var subIter = DBusMessageIter()
         dbus_message_iter_recurse(iter, &subIter)
@@ -239,6 +243,33 @@ extension String: DBusBasicType {
             var val = $0
             _ = dbus_message_iter_append_basic(iter, type(of: self)._dbusType.rawValue, &val)
         }
+    }
+}
+
+public struct DBusSignature: DBusBasicType {
+    public let signature: String
+    
+    public init(_ signature: String) {
+        self.signature = signature
+    }
+    
+    public static var _dbusType: _DBusType {
+        return .signature
+    }
+    
+    public func _append(to iter: UnsafeMutablePointer<DBusMessageIter>) {
+        signature.withCString {
+            var val = $0
+            _ = dbus_message_iter_append_basic(iter, type(of: self)._dbusType.rawValue, &val)
+        }
+    }
+    
+    public static func==(lhs: DBusSignature, rhs: DBusSignature) -> Bool {
+        return lhs.signature == rhs.signature
+    }
+    
+    public var hashValue: Int {
+        return self.signature.hashValue
     }
 }
 
