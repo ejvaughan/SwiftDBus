@@ -30,7 +30,7 @@ class SomeObject: ExportedObject {
 
 class ExportedObjectTests: XCTestCase {
     
-    func testExportedObject() {
+    func testExportedObjectMethodInvocation() {
         let exportedObject = SomeObject()
         let connection = try! Connection(type: .session)
         
@@ -41,7 +41,7 @@ class ExportedObjectTests: XCTestCase {
         var p: ObjectProxy?
         
         connection.makeProxy(forService: connection.uniqueName, objectPath: "/com/ejv/test") { proxy in
-            guard let proxy = proxy else { XCTFail(); return }
+            guard let proxy = proxy else { XCTFail("Failed to create proxy object"); return }
             
             p = proxy
             
@@ -54,6 +54,34 @@ class ExportedObjectTests: XCTestCase {
                     XCTFail()
                 }
             }
+        }
+        
+        waitForExpectations(timeout: 5.0, handler: nil)
+    }
+    
+    func testExportedObjectEmitSignal() {
+        let exportedObject = SomeObject()
+        let connection = try! Connection(type: .session)
+        
+        let path = "/com/ejv/test"
+        let signal = "foo"
+        
+        connection.export(object: exportedObject, at: path)
+        
+        var p: ObjectProxy?
+        
+        let expect = expectation(description: "Waiting for signal")
+        
+        connection.makeProxy(forService: connection.uniqueName, objectPath: path) { proxy in
+            guard let proxy = proxy else { XCTFail("Failed to create proxy object"); return }
+            
+            p = proxy
+            
+            proxy.registerSignalHandler(for: signal) { arguments in
+                expect.fulfill()
+            }
+            
+            exportedObject.emitSignal(name: signal, interface: "com.ejv.test")
         }
         
         waitForExpectations(timeout: 5.0, handler: nil)
